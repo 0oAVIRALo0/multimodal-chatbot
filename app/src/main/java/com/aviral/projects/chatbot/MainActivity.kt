@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
+import android.os.Looper
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -20,13 +21,16 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -69,17 +73,32 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CardDefaults
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.io.File
+import java.io.IOException
 
-class MainActivity : ComponentActivity(), DeepgramTranscriptionService.TranscriptionListener {
+
+// Theme
+//private val DyslexicFont = FontFamily(
+//    Font(R.font.lexend_regular, FontWeight.Normal)
+//)
+
+class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -93,20 +112,7 @@ class MainActivity : ComponentActivity(), DeepgramTranscriptionService.Transcrip
             }
         }
     }
-
-    override fun onTranscriptReceived(transcript: String, isFinal: Boolean) {
-        TODO("Not yet implemented")
-    }
-
-    override fun onError(error: String) {
-        TODO("Not yet implemented")
-    }
 }
-
-// Theme
-//private val DyslexicFont = FontFamily(
-//    Font(R.font.lexend_regular, FontWeight.Normal)
-//)
 
 private val LightColorScheme = lightColorScheme(
     primary = Color(0xFF2A6F97),
@@ -135,7 +141,7 @@ fun ChatBotTheme(content: @Composable () -> Unit) {
 }
 
 // Screen 1 - Upload Screen
-@SuppressLint("StateFlowValueCalledInComposition")
+//@SuppressLint("StateFlowValueCalledInComposition")
 @Composable
 fun UploadScreen(navController: NavController) {
     val context = LocalContext.current
@@ -214,14 +220,25 @@ fun UploadScreen(navController: NavController) {
             ) {
                 IconButton(
                     onClick = {
-                        viewModel.OCR_text?.let { filePath ->
+                        viewModel.OCR_text?.let { ocrText ->
+                            if (ocrText.isBlank()) {
+                                Toast.makeText(context, "No text found in image", Toast.LENGTH_SHORT).show()
+                                return@let
+                            }
+
                             viewModel.generateTtsAudio(
-                                text = filePath, // Or use actual text content if needed
+                                text = ocrText,
                                 context = context,
                                 onSuccess = { audioFile ->
-                                    MediaPlayer.create(context, Uri.fromFile(audioFile))?.apply {
+                                    val contentUri = FileProvider.getUriForFile(
+                                        context,
+                                        "${context.packageName}.provider",
+                                        audioFile
+                                    )
+
+                                    MediaPlayer.create(context, contentUri)?.apply {
                                         setOnPreparedListener { mp ->
-                                            mp.playbackParams = mp.playbackParams.setSpeed(0.7f)
+                                            mp.playbackParams = mp.playbackParams.setSpeed(0.8f)
                                             mp.start()
                                         }
                                         setOnCompletionListener {
@@ -249,7 +266,7 @@ fun UploadScreen(navController: NavController) {
                             Toast.makeText(context, "No content available", Toast.LENGTH_SHORT).show()
                         }
                     },
-                    modifier = Modifier.size(64.dp)
+                    modifier = Modifier.size(80.dp)
                 ) {
                     Icon(
                         Icons.Default.VolumeUp,
@@ -258,18 +275,18 @@ fun UploadScreen(navController: NavController) {
                     )
                 }
 
-                Button(
-                    onClick = { /* Handle reupload */ },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-                ) {
-                    Text("Reupload")
-                }
+//                Button(
+//                    onClick = { /* Handle reupload */ },
+//                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+//                ) {
+//                    Text("Reupload")
+//                }
 
                 Button(
                     onClick = { navController.navigate("screen2") },
                     modifier = Modifier.padding(top = 16.dp)
                 ) {
-                    Text("Next")
+                    Text("Any questions? Ask me")
                 }
             }
         }
@@ -298,59 +315,181 @@ fun UploadButton(icon: ImageVector, text: String, onClick: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(navController: NavController) {
-    var message by remember { mutableStateOf("") }
-    val messages = remember { mutableStateListOf<ChatMessage>() }
+    val scope = rememberCoroutineScope()
+    val textFieldState = remember { mutableStateOf(TextFieldValue()) }
+    val messages = remember {
+        mutableStateListOf(
+            ChatMessage("How can I help you?", false)
+        )
+    }
+    val viewModel: ChatViewModel = viewModel()
+    val scrollState = rememberLazyListState()
+    val context = LocalContext.current
+    var isRecording by remember { mutableStateOf(false) }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = { Text("Learning Assistant") },
-            navigationIcon = {
-                IconButton(onClick = { navController.popBackStack() }) {
-                    Icon(Icons.Default.ArrowBack, "Back")
+    // Track transcription state
+    var stableText by remember { mutableStateOf("") }
+    var interimText by remember { mutableStateOf("") }
+
+    // STT Service
+    val deepgram = remember {
+        DeepgramTranscriptionService(
+            context = context,
+            apiKey = "d56a937b3291497b90601f64fd35e3a74c359c5d",
+            object : DeepgramTranscriptionService.TranscriptionListener {
+                override fun onTranscriptReceived(transcript: String, isFinal: Boolean) {
+                    if (isFinal) {
+                        stableText += if (stableText.isEmpty()) transcript else " $transcript"
+                        interimText = ""
+                    } else {
+                        // Update interim text with latest partial result
+                        interimText = transcript
+                    }
+
+                    // Update text field with combined stable + interim
+                    val displayText = if (interimText.isNotEmpty()) {
+                        if (stableText.isEmpty()) interimText else "$stableText $interimText"
+                    } else {
+                        stableText
+                    }
+
+                    textFieldState.value = TextFieldValue(
+                        text = displayText,
+                        selection = TextRange(displayText.length)
+                    )
+                }
+
+                override fun onError(error: String) {
+                    CoroutineScope(Dispatchers.Main).launch {
+                        Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         )
+    }
 
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(messages) { message ->
-                ChatBubble(message)
-            }
+    // Audio Permission
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            isRecording = true
+            deepgram.startTranscribing()
         }
+    }
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = message,
-                onValueChange = { message = it },
-                modifier = Modifier.weight(1f),
-                colors = TextFieldDefaults.outlinedTextFieldColors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    cursorColor = MaterialTheme.colorScheme.primary
-                )
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Learning Assistant") },
+                navigationIcon = {
+                    IconButton(onClick = { navController.popBackStack() }) {
+                        Icon(Icons.Default.ArrowBack, "Back")
+                    }
+                }
             )
-
-            IconButton(
-                onClick = { /* STT implementation */ },
+        },
+        contentWindowInsets = WindowInsets.navigationBars
+    ) { paddingValues ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+        ) {
+            LazyColumn(
                 modifier = Modifier
-                    .padding(start = 8.dp)
-                    .size(48.dp)
+                    .weight(1f)
+                    .padding(16.dp),
+                state = scrollState,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(Icons.Default.Mic, "Voice Input")
+                items(messages) { message ->
+                    ChatBubble(message)
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = textFieldState.value,
+                    onValueChange = {
+                        textFieldState.value = it
+                        stableText = it.text
+                        interimText = ""
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = TextFieldDefaults.outlinedTextFieldColors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        cursorColor = MaterialTheme.colorScheme.primary
+                    ),
+                    placeholder = { Text("Type or speak your question...") }
+                )
+
+                IconButton(
+                    onClick = {
+                        if (textFieldState.value.text.isNotBlank()) {
+                            messages.add(ChatMessage(textFieldState.value.text, true))
+                            messages.add(ChatMessage("Thinking...", false))
+
+                            // Clear all states
+                            stableText = ""
+                            interimText = ""
+                            textFieldState.value = TextFieldValue()
+
+                            viewModel.sendMessage(textFieldState.value.text) { response ->
+                                messages[messages.lastIndex] = ChatMessage(response, false)
+                                scope.launch {
+                                    scrollState.animateScrollToItem(messages.size - 1)
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(Icons.Default.Send, "Send")
+                }
+
+                IconButton(
+                    onClick = {
+                        if (isRecording) {
+                            deepgram.stopTranscribing()
+                            isRecording = false
+                            // Commit any remaining interim text
+                            if (interimText.isNotEmpty()) {
+                                stableText += if (stableText.isEmpty()) interimText else " $interimText"
+                                interimText = ""
+                                textFieldState.value = TextFieldValue(stableText)
+                            }
+                        } else {
+                            if (ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.RECORD_AUDIO
+                                ) == PackageManager.PERMISSION_GRANTED
+                            ) {
+                                isRecording = true
+                                deepgram.startTranscribing()
+                            } else {
+                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                        }
+                    },
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Mic,
+                        "Voice Input",
+                        tint = if (isRecording) Color.Red else MaterialTheme.colorScheme.primary
+                    )
+                }
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatBubble(message: ChatMessage) {
     Box(
@@ -362,14 +501,15 @@ fun ChatBubble(message: ChatMessage) {
         Card(
             colors = CardDefaults.cardColors(
                 containerColor = if (message.isUser) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.secondary
+                else Color.White
             ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
             modifier = Modifier.widthIn(max = 300.dp)
         ) {
             Text(
                 text = message.text,
                 modifier = Modifier.padding(16.dp),
-                color = Color.White
+                color = if (message.isUser) Color.White else MaterialTheme.colorScheme.primary
             )
         }
     }
@@ -378,8 +518,12 @@ fun ChatBubble(message: ChatMessage) {
 data class ChatMessage(val text: String, val isUser: Boolean)
 
 fun MediaPlayer.playFile(file: File) {
-    reset()
-    setDataSource(file.absolutePath)
-    prepare()
-    start()
+    try {
+        reset()
+        setDataSource(file.absolutePath)
+        prepareAsync()
+        setOnPreparedListener { start() }
+    } catch (e: IOException) {
+        Log.e("MediaPlayer", "Error playing file", e)
+    }
 }

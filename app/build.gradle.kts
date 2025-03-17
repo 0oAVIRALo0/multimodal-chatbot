@@ -57,6 +57,9 @@ dependencies {
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
 
+    // ML Kit for text recognition
+//    implementation(libs.google.mlkit.text.recognition)
+
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("androidx.compose.ui:ui:1.6.3")
@@ -80,4 +83,20 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.5.1")
     implementation("androidx.activity:activity-compose:1.6.1")
     implementation("com.google.code.gson:gson:2.10.1")
+
+    implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.0")
+    implementation("com.google.accompanist:accompanist-permissions:0.31.3-beta")
+    implementation("androidx.navigation:navigation-compose:2.7.5")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.6.2")
+
+//    implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.0")
+
+    // Coroutines support for Google Play services
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
+    implementation("com.google.mlkit:text-recognition:16.0.0")
+
+    // Existing dependencies
+//    implementation("androidx.core:core-ktx:1.12.0")
+//    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+//    implementation("androidx.activity:activity-compose:1.8.2")
 }

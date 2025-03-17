@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.ContentResolver
 import android.content.ContentValues.TAG
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Environment
 import android.provider.OpenableColumns
@@ -15,6 +16,8 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,12 +27,16 @@ import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.*
+import com.google.mlkit.vision.text.TextRecognition
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.tasks.await
 
 class UploadViewModel : ViewModel() {
     private val _fileUploaded = MutableStateFlow(false)
@@ -46,51 +53,47 @@ class UploadViewModel : ViewModel() {
 
     private val okHttpClient = OkHttpClient()
 
+    fun cleanup() {
+        uploadedFile?.delete()
+        _ttsFile.value?.delete()
+    }
+
+    override fun onCleared() {
+        cleanup()
+        super.onCleared()
+    }
+
     fun uploadFile(uri: Uri, context: Context) {
-        viewModelScope.launch(Dispatchers.IO) { // 🚀 Moved entire function to IO thread
+        viewModelScope.launch(Dispatchers.IO) {
             try {
-                uploadedFile = uri.toFile(context)
-                val contentResolver = context.contentResolver
-
-                val requestBody = MultipartBody.Builder()
-                    .setType(MultipartBody.FORM)
-                    .addFormDataPart(
-                        "file",
-                        getFileName(contentResolver, uri),
-                        contentResolver.openInputStream(uri)!!.readBytes()
-                            .toRequestBody(contentResolver.getType(uri)?.toMediaTypeOrNull())
-                    )
-                    .build()
-
-                val request = Request.Builder()
-                    .url("http://192.168.1.7:5000/process-file")
-                    .post(requestBody)
-                    .build()
-
-                val response = OkHttpClient().newCall(request).execute()
-                val responseBody = response.body?.string()
-
-                // Add detailed logging
-                Log.d("UPLOAD", "Response code: ${response.code}")
-                Log.d("UPLOAD", "Response body: ${responseBody}")
-
-                // Parse server response to get file path
-                OCR_text = responseBody?.let {
-                    val json = JSONObject(it) // Parse JSON
-                    json.optString("OCR_text", "") // Get the file_path value
+                // Decode bitmap with scaling
+                val options = BitmapFactory.Options().apply {
+                    inSampleSize = 2
                 }
-                OCR_text?.let { Log.d("FILE PATH", it) }
 
-                // Update state on main thread
+                val bitmap = context.contentResolver.openInputStream(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream, null, options)
+                } ?: throw IOException("Failed to open image stream")
+
+                // Process with ML Kit
+                val image = InputImage.fromBitmap(bitmap, 0)
+                val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+
+                // Using coroutines await() for async operation
+                val textResult = recognizer.process(image).await()
+
+                OCR_text = textResult.text
+                Log.d("EXTRACTED TEXT", OCR_text!!)
+
                 withContext(Dispatchers.Main) {
-                    _fileUploaded.value = response.isSuccessful
-                    if (!response.isSuccessful) {
-                        Log.e("UPLOAD", "Upload failed: ${response.message}")
-                    }
+                    _fileUploaded.value = true
+                    Toast.makeText(context, "OCR completed", Toast.LENGTH_SHORT).show()
                 }
 
-            } catch (e: IOException) {
-                e.printStackTrace()
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
@@ -110,22 +113,13 @@ class UploadViewModel : ViewModel() {
         )
     }
 
-    @SuppressLint("Range")
-    private fun getFileName(contentResolver: ContentResolver, uri: Uri): String {
-        return when (uri.scheme) {
-            "content" -> contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                cursor.moveToFirst()
-                cursor.getString(cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME))
-            } ?: "unknown_file"
-            else -> uri.path?.substringAfterLast('/') ?: "unknown_file"
-        }
-    }
-
     fun generateTtsAudio(text: String, context: Context, onSuccess: (File) -> Unit, onError: (String) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val jsonBody = """{"text": "${text.replace("\"", "\\\"")}"}"""
+                val sanitizedText = text
+                    .replace(Regex("[^\\p{Print}]"), " ") // Remove non-printable chars
 
+                val jsonBody = """{"text": "${sanitizedText.replace("\"", "\\\"")}"}"""
                 val requestBody = jsonBody.toRequestBody("application/json".toMediaTypeOrNull())
 
                 val request = Request.Builder()
@@ -138,12 +132,17 @@ class UploadViewModel : ViewModel() {
                 val response = okHttpClient.newCall(request).execute()
 
                 if (!response.isSuccessful) {
-                    onError("API Error: ${response.code} - ${response.message}")
+                    val errorBody = response.body?.string() ?: "No error details"
+                    withContext(Dispatchers.Main) {
+                        onError("API Error ${response.code}: $errorBody")
+                    }
                     return@launch
                 }
 
                 val audioBytes = response.body?.bytes() ?: run {
-                    onError("Empty audio response")
+                    withContext(Dispatchers.Main) {
+                        onError("Empty audio response")
+                    }
                     return@launch
                 }
 
@@ -166,22 +165,4 @@ class UploadViewModel : ViewModel() {
             }
         }
     }
-}
-
-
-fun Uri.toFile(context: Context): File {
-    val inputStream = context.contentResolver.openInputStream(this)
-        ?: throw IOException("Cannot open input stream")
-
-    val file = File.createTempFile("upload_", ".tmp", context.cacheDir).apply {
-        deleteOnExit()
-    }
-
-    Log.d("FILE_CONV", "Converting URI to file: ${this.path}")
-    Log.d("FILE_CONV", "Target file: ${file.absolutePath}")
-
-    file.outputStream().use { output ->
-        inputStream.copyTo(output)
-    }
-    return file
 }

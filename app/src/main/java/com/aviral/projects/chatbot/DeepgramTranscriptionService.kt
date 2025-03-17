@@ -57,7 +57,9 @@ class DeepgramTranscriptionService(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: okhttp3.Response?) {
-                listener.onError("WebSocket error: ${t.message}")
+                CoroutineScope(Dispatchers.Main).launch {
+                    listener.onError("WebSocket error: ${t.message}")
+                }
                 stopTranscribing()
             }
         })
@@ -78,7 +80,7 @@ class DeepgramTranscriptionService(
         // Get the minimum buffer size for AudioRecord (for initialization)
         val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
         // Define a smaller chunk size for sending audio data (adjust as needed)
-        val chunkSize = 1024
+        val chunkSize = 4096
 
         audioRecord = AudioRecord(
             MediaRecorder.AudioSource.MIC,
