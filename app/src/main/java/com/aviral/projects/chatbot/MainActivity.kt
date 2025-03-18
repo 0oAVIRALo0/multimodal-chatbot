@@ -7,7 +7,6 @@ import android.content.pm.PackageManager
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
-import android.os.Looper
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -33,7 +32,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -56,17 +54,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.Font
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.aviral.projects.chatbot.ui.theme.ChatbotTheme
 
 // Icons
 import androidx.compose.material.icons.Icons
@@ -77,6 +70,8 @@ import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.rememberCoroutineScope
@@ -107,7 +102,12 @@ class MainActivity : ComponentActivity() {
                 val navController = rememberNavController()
                 NavHost(navController = navController, startDestination = "screen1") {
                     composable("screen1") { UploadScreen(navController) }
-                    composable("screen2") { ChatScreen(navController) }
+                    composable("screen2/{sessionId}") { backStackEntry ->
+                        ChatScreen(
+                            navController = navController,
+                            sessionId = backStackEntry.arguments?.getString("sessionId")
+                        )
+                    }
                 }
             }
         }
@@ -142,6 +142,7 @@ fun ChatBotTheme(content: @Composable () -> Unit) {
 
 // Screen 1 - Upload Screen
 //@SuppressLint("StateFlowValueCalledInComposition")
+@SuppressLint("StateFlowValueCalledInComposition")
 @Composable
 fun UploadScreen(navController: NavController) {
     val context = LocalContext.current
@@ -282,11 +283,50 @@ fun UploadScreen(navController: NavController) {
 //                    Text("Reupload")
 //                }
 
-                Button(
-                    onClick = { navController.navigate("screen2") },
-                    modifier = Modifier.padding(top = 16.dp)
-                ) {
-                    Text("Any questions? Ask me")
+                val isProcessing by viewModel.isProcessing.collectAsState()
+
+                // Add progress indicator
+                if (isProcessing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .padding(top = 16.dp)
+                            .size(48.dp),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                } else {
+                    Button(
+                        onClick = {
+                            viewModel.OCR_text?.let { ocrText ->
+                                if (ocrText.isBlank()) {
+                                    Toast.makeText(
+                                        context,
+                                        "No text extracted from document",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                } else {
+                                    viewModel.sendOCRToAPI(
+                                        text = ocrText,
+                                        context = context,
+                                        onSuccess = { sessionId ->
+                                            navController.navigate("screen2/$sessionId")
+                                        },
+                                        onError = { error ->
+                                            Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                                        }
+                                    )
+                                }
+                            } ?: run {
+                                Toast.makeText(
+                                    context,
+                                    "Please upload a document first",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        },
+                        modifier = Modifier.padding(top = 16.dp)
+                    ) {
+                        Text("Any questions? Ask me")
+                    }
                 }
             }
         }
@@ -314,7 +354,7 @@ fun UploadButton(icon: ImageVector, text: String, onClick: () -> Unit) {
 // Screen 2 - Chat Screen
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(navController: NavController) {
+fun ChatScreen(navController: NavController, sessionId: String?) {
     val scope = rememberCoroutineScope()
     val textFieldState = remember { mutableStateOf(TextFieldValue()) }
     val messages = remember {
@@ -366,6 +406,19 @@ fun ChatScreen(navController: NavController) {
                 }
             }
         )
+    }
+
+    // Get session ID from arguments
+    val sessionId = remember {
+        navController.currentBackStackEntry?.arguments?.getString("sessionId")
+    }
+
+    // Show error if session ID is missing
+    LaunchedEffect(sessionId) {
+        if (sessionId == null) {
+            Toast.makeText(context, "Session expired", Toast.LENGTH_LONG).show()
+            navController.popBackStack()
+        }
     }
 
     // Audio Permission
@@ -432,20 +485,21 @@ fun ChatScreen(navController: NavController) {
                 IconButton(
                     onClick = {
                         if (textFieldState.value.text.isNotBlank()) {
-                            messages.add(ChatMessage(textFieldState.value.text, true))
+                            val userMessage = textFieldState.value.text
+                            messages.add(ChatMessage(userMessage, true))
                             messages.add(ChatMessage("Thinking...", false))
 
-                            // Clear all states
-                            stableText = ""
-                            interimText = ""
-                            textFieldState.value = TextFieldValue()
-
-                            viewModel.sendMessage(textFieldState.value.text) { response ->
+                            viewModel.sendMessage(userMessage) { response ->
                                 messages[messages.lastIndex] = ChatMessage(response, false)
                                 scope.launch {
                                     scrollState.animateScrollToItem(messages.size - 1)
                                 }
                             }
+
+                            // Clear input
+                            stableText = ""
+                            interimText = ""
+                            textFieldState.value = TextFieldValue()
                         }
                     },
                     modifier = Modifier.size(48.dp)
