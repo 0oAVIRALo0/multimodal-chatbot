@@ -1,6 +1,7 @@
 package com.aviral.projects.chatbot
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Environment
@@ -29,9 +30,9 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.*
 import com.google.mlkit.vision.text.TextRecognition
+import com.itextpdf.text.pdf.PdfReader
+import com.itextpdf.text.pdf.parser.PdfTextExtractor
 import kotlinx.coroutines.tasks.await
-import com.tom_roush.pdfbox.pdmodel.PDDocument
-import com.tom_roush.pdfbox.text.PDFTextStripper
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.zip.ZipInputStream
 import org.xmlpull.v1.XmlPullParser
@@ -75,7 +76,6 @@ class UploadViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val mimeType = context.contentResolver.getType(uri) ?: ""
-
                 when {
                     mimeType.startsWith("image/") -> processImage(uri, context)
                     mimeType == "application/pdf" -> processPdf(uri, context)
@@ -83,12 +83,10 @@ class UploadViewModel : ViewModel() {
                         processDocx(uri, context)
                     else -> throw IOException("Unsupported file type: $mimeType")
                 }
-
                 withContext(Dispatchers.Main) {
                     _fileUploaded.value = true
                     Toast.makeText(context, "File processed", Toast.LENGTH_SHORT).show()
                 }
-
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "Error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
@@ -97,7 +95,7 @@ class UploadViewModel : ViewModel() {
         }
     }
 
-    private suspend fun processImage(uri: Uri, context: Context) {
+    private fun processImage(uri: Uri, context: Context) {
 //        val options = BitmapFactory.Options().apply { inSampleSize = 2 }
 //        val bitmap = context.contentResolver.openInputStream(uri)?.use {
 //            BitmapFactory.decodeStream(it, null, options)
@@ -143,32 +141,60 @@ class UploadViewModel : ViewModel() {
 
     private fun processPdf(uri: Uri, context: Context) {
         context.contentResolver.openInputStream(uri)?.use { stream ->
-            val pdfDoc = PDDocument.load(stream)
-            val stripper = PDFTextStripper()
-            OCR_text = stripper.getText(pdfDoc)
-            pdfDoc.close()
+            val pdfReader = PdfReader(stream)
+            val text = StringBuilder()
+
+            // Extract text from each page
+            for (pageNum in 1..pdfReader.numberOfPages) {
+                text.append(
+                    PdfTextExtractor.getTextFromPage(pdfReader, pageNum)
+                )
+            }
+
+            OCR_text = text.toString().trim()
+            Log.d("OCR TEXT FROM PDF", OCR_text!!)
+            pdfReader.close()
         } ?: throw IOException("Failed to open PDF")
     }
 
-    private fun processDocx(uri: Uri, context: Context) {
+    private suspend fun processDocx(uri: Uri, context: Context) {
         context.contentResolver.openInputStream(uri)?.use { stream ->
             val zipInputStream = ZipInputStream(stream)
             val text = StringBuilder()
 
+            // Extract text from document.xml
             generateSequence { zipInputStream.nextEntry }
                 .filter { it.name == "word/document.xml" }
-                .forEach {
+                .forEach { entry ->
                     val xmlContent = zipInputStream.readBytes().toString(Charsets.UTF_8)
                     val xml = XmlPullParserFactory.newInstance().newPullParser().apply {
                         setInput(xmlContent.reader())
                     }
-
                     var eventType = xml.eventType
                     while (eventType != XmlPullParser.END_DOCUMENT) {
                         if (eventType == XmlPullParser.TEXT) text.append(xml.text).append(" ")
                         eventType = xml.next()
                     }
                 }
+
+            // Reset stream to process images
+            context.contentResolver.openInputStream(uri)?.use { newStream ->
+                val imageZip = ZipInputStream(newStream)
+                generateSequence { imageZip.nextEntry }
+                    .filter { it.name.startsWith("word/media/") }
+                    .forEach { imageEntry ->
+                        val imageBytes = imageZip.readBytes()
+                        val tempFile = File.createTempFile("docx_img_", ".${imageEntry.name.substringAfterLast('.')}", context.cacheDir)
+                        FileOutputStream(tempFile).use { it.write(imageBytes) }
+
+                        // Process image with OCR
+                        val image = InputImage.fromFilePath(context, Uri.fromFile(tempFile))
+                        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                        val result = recognizer.process(image).await()
+                        text.append(result.text).append(" ")
+                        tempFile.delete()
+                    }
+            }
 
             OCR_text = text.toString().replace("\\s+".toRegex(), " ").trim()
         } ?: throw IOException("Failed to open DOCX")
@@ -238,46 +264,6 @@ class UploadViewModel : ViewModel() {
                 withContext(Dispatchers.Main) {
                     onError("Error generating speech: ${e.localizedMessage}")
                 }
-            }
-        }
-    }
-
-    fun sendOCRToAPI2(text: String, context: Context, onSuccess: () -> Unit, onError: (String) -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
-            _isProcessing.value = true
-            try {
-                val client = OkHttpClient()
-                val jsonBody = """{"text": "${text}"}"""
-                Log.d("DATA", jsonBody)
-                val requestBody = jsonBody.toRequestBody("application/json".toMediaTypeOrNull())
-
-                Log.d("HELLO", "HELLO")
-                val request = Request.Builder()
-                    .url("http://192.168.1.7:5000/process")
-                    .post(requestBody)
-                    .build()
-
-                val response = client.newCall(request).execute()
-                Log.d("HERE", response.toString())
-
-                if (!response.isSuccessful) {
-                    val errorBody = response.body?.string() ?: "Unknown error"
-                    withContext(Dispatchers.Main) {
-                        onError("API Error ${response.code}: $errorBody")
-                    }
-                    return@launch
-                }
-
-                withContext(Dispatchers.Main) {
-                    onSuccess()
-                }
-
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    onError("Network error: ${e.localizedMessage}")
-                }
-            } finally {
-                _isProcessing.value = false
             }
         }
     }
@@ -354,5 +340,44 @@ class UploadViewModel : ViewModel() {
             }
         }
     }
-
 }
+
+//fun sendOCRToAPI2(text: String, context: Context, onSuccess: () -> Unit, onError: (String) -> Unit) {
+//    viewModelScope.launch(Dispatchers.IO) {
+//        _isProcessing.value = true
+//        try {
+//            val client = OkHttpClient()
+//            val jsonBody = """{"text": "${text}"}"""
+//            Log.d("DATA", jsonBody)
+//            val requestBody = jsonBody.toRequestBody("application/json".toMediaTypeOrNull())
+//
+//            Log.d("HELLO", "HELLO")
+//            val request = Request.Builder()
+//                .url("http://192.168.1.7:5000/process")
+//                .post(requestBody)
+//                .build()
+//
+//            val response = client.newCall(request).execute()
+//            Log.d("HERE", response.toString())
+//
+//            if (!response.isSuccessful) {
+//                val errorBody = response.body?.string() ?: "Unknown error"
+//                withContext(Dispatchers.Main) {
+//                    onError("API Error ${response.code}: $errorBody")
+//                }
+//                return@launch
+//            }
+//
+//            withContext(Dispatchers.Main) {
+//                onSuccess()
+//            }
+//
+//        } catch (e: Exception) {
+//            withContext(Dispatchers.Main) {
+//                onError("Network error: ${e.localizedMessage}")
+//            }
+//        } finally {
+//            _isProcessing.value = false
+//        }
+//    }
+//}

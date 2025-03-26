@@ -95,7 +95,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
     implementation("com.google.mlkit:text-recognition:16.0.0")
 
-    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+    implementation("com.itextpdf:itextg:5.5.10")
     implementation("androidx.documentfile:documentfile:1.0.1")
 //    implementation("com.tom-roush:pdfbox-tools:2.0.27.0")
 

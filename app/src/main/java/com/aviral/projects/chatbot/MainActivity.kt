@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -30,7 +31,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -71,6 +74,7 @@ import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateListOf
@@ -141,11 +145,22 @@ fun ChatBotTheme(content: @Composable () -> Unit) {
 }
 
 // Screen 1 - Upload Screen
-//@SuppressLint("StateFlowValueCalledInComposition")
 @SuppressLint("StateFlowValueCalledInComposition")
 @Composable
 fun UploadScreen(navController: NavController) {
     val context = LocalContext.current
+    var mediaPlayer = remember { MediaPlayer() }
+
+    // Clean up when composable leaves composition
+    DisposableEffect(Unit) {
+        onDispose {
+            mediaPlayer.apply {
+                if (isPlaying) stop()
+                release()
+            }
+        }
+    }
+
     val viewModel: UploadViewModel = viewModel()
     val fileUploaded by viewModel.fileUploaded.collectAsState()
     var imageUri by remember { mutableStateOf<Uri?>(null) }
@@ -219,6 +234,30 @@ fun UploadScreen(navController: NavController) {
                 modifier = Modifier.padding(top = 32.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                // Add this Card to show extracted text
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 100.dp, max = 300.dp)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    elevation = CardDefaults.cardElevation(4.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(16.dp)
+                    ) {
+                        Text(
+                            text = viewModel.OCR_text ?: "No text extracted",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (viewModel.OCR_text.isNullOrBlank())
+                                MaterialTheme.colorScheme.error
+                            else
+                                MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
                 IconButton(
                     onClick = {
                         viewModel.OCR_text?.let { ocrText ->
@@ -231,29 +270,36 @@ fun UploadScreen(navController: NavController) {
                                 text = ocrText,
                                 context = context,
                                 onSuccess = { audioFile ->
-                                    val contentUri = FileProvider.getUriForFile(
-                                        context,
-                                        "${context.packageName}.provider",
-                                        audioFile
-                                    )
+                                    try {
+                                        val contentUri = FileProvider.getUriForFile(
+                                            context,
+                                            "${context.packageName}.provider",
+                                            audioFile
+                                        )
 
-                                    MediaPlayer.create(context, contentUri)?.apply {
-                                        setOnPreparedListener { mp ->
-                                            mp.playbackParams = mp.playbackParams.setSpeed(0.8f)
-                                            mp.start()
+                                        mediaPlayer.apply {
+                                            reset()
+                                            setDataSource(context, contentUri)
+                                            prepareAsync()
+                                            setOnPreparedListener { mp ->
+                                                mp.playbackParams = mp.playbackParams.setSpeed(0.8f)
+                                                mp.start()
+                                            }
+                                            setOnCompletionListener {
+                                                it.release()
+                                                audioFile.delete()
+                                                // Reset mediaPlayer for next use
+                                                mediaPlayer = MediaPlayer()
+                                            }
+                                            setOnErrorListener { _, what, extra ->
+                                                Log.e("TTS", "Playback error: $what, $extra")
+                                                release()
+                                                audioFile.delete()
+                                                true
+                                            }
                                         }
-                                        setOnCompletionListener {
-                                            it.release()
-                                            audioFile.delete()
-                                        }
-                                        setOnErrorListener { _, what, extra ->
-                                            Log.e("TTS", "Playback error: $what, $extra")
-                                            release()
-                                            audioFile.delete()
-                                            false
-                                        }
-                                    } ?: run {
-                                        Log.e("TTS", "Failed to initialize MediaPlayer")
+                                    } catch (e: Exception) {
+                                        Log.e("TTS", "Playback failed", e)
                                         audioFile.delete()
                                     }
                                 },
